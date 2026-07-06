@@ -1,0 +1,88 @@
+# Production compose for an on-prem single-box deployment: Postgres + API +
+# nginx web + the privileged updater sidecar. Images are pulled from a registry
+# (not built here); the image tag tracks APP_VERSION.
+#
+# IMPORTANT — deploy directory:
+#   Copy this file + a real .env into a directory on the HOST (e.g. /opt/campus)
+#   and run compose from there. The updater bind-mounts that SAME absolute path
+#   into itself (DEPLOY_DIR:DEPLOY_DIR) so that when it runs `docker compose`
+#   against the host daemon, relative paths and `.env` resolve identically inside
+#   and outside the container. Set DEPLOY_DIR in .env to that directory.
+#
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml run --rm api pnpm prisma migrate deploy
+#
+# Replace ghcr.io/OWNER/REPO (or set IMAGE_PREFIX in .env) with your registry.
+
+name: ${COMPOSE_PROJECT_NAME:-campus}
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-campus}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-campus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    image: ${IMAGE_PREFIX:-ghcr.io/OWNER/REPO}/campus-api:${APP_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-campus}?schema=public"
+      BACKUP_DIRECTORY: /app/backups
+      # APP_VERSION is baked into the image (self-reported by GET /system/version); do NOT set it
+      # here — that would override the image's real version. The image TAG is still chosen by
+      # ${APP_VERSION} on the `image:` line; set APP_VERSION in .env only to pin a specific tag.
+    volumes:
+      - uploads_data:/app/uploads
+      - backups_data:/app/backups
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    image: ${IMAGE_PREFIX:-ghcr.io/OWNER/REPO}/campus-web:${APP_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    depends_on:
+      - api
+
+  # Privileged sidecar — the ONLY component with the Docker socket. Watches the
+  # UpdateJob table and performs pull → migrate → restart when an admin clicks
+  # "Apply update". No exposed port.
+  updater:
+    image: ${IMAGE_PREFIX:-ghcr.io/OWNER/REPO}/campus-updater:${APP_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    working_dir: ${DEPLOY_DIR:-/opt/campus}
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-campus}?schema=public"
+      UPDATER_WORKDIR: ${DEPLOY_DIR:-/opt/campus}
+      UPDATER_COMPOSE_FILE: docker-compose.prod.yml
+      UPDATER_RESTART_SERVICES: "api web"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same absolute path inside and out, so the nested `docker compose` (which
+      # talks to the HOST daemon) resolves the compose file + .env + relative
+      # mounts correctly.
+      - ${DEPLOY_DIR:-/opt/campus}:${DEPLOY_DIR:-/opt/campus}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  uploads_data:
+  backups_data:
