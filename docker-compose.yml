@@ -1,0 +1,48 @@
+name: ${COMPOSE_PROJECT_NAME:-campus}
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-campus}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-campus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    image: ${IMAGE_PREFIX:-ghcr.io/OWNER/REPO}/campus-api:${APP_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-campus}?schema=public"
+      BACKUP_DIRECTORY: /app/backups
+      # APP_VERSION is baked into the image (self-reported by GET /system/version); do NOT set it
+      # here — that would override the image's real version. The image TAG is still chosen by
+      # ${APP_VERSION} on the `image:` line; set APP_VERSION in .env only to pin a specific tag.
+    volumes:
+      - uploads_data:/app/uploads
+      - backups_data:/app/backups
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    image: ${IMAGE_PREFIX:-ghcr.io/OWNER/REPO}/campus-web:${APP_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  uploads_data:
+  backups_data:
