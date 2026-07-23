@@ -42,6 +42,35 @@ services:
     depends_on:
       - api
 
+  # Privileged sidecar — the ONLY component with the Docker socket. Watches the
+  # UpdateJob table and performs the on-host update (bump APP_VERSION in .env →
+  # pull → migrate deploy → up -d api web) when an admin clicks Settings → Update
+  # → Apply. It lives IN this same compose file (UPDATER_COMPOSE_FILE below points
+  # back at it) so the reference can never drift out from under it. No exposed port.
+  # Recreates only `api web`, NEVER itself. DEPLOY_DIR must be this deploy directory
+  # on the HOST, bind-mounted at the identical path so the nested `docker compose`
+  # (talking to the host daemon) resolves this file + .env + relative mounts.
+  updater:
+    image: ${IMAGE_PREFIX:-ghcr.io/OWNER/REPO}/campus-updater:${APP_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    working_dir: ${DEPLOY_DIR:-/opt/campus}
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-campus}?schema=public"
+      UPDATER_WORKDIR: ${DEPLOY_DIR:-/opt/campus}
+      # MUST match the compose filename actually saved in DEPLOY_DIR. Defaults to this
+      # file's name; override in .env only if you deploy under a different filename.
+      UPDATER_COMPOSE_FILE: ${UPDATER_COMPOSE_FILE:-docker-compose.yml}
+      UPDATER_RESTART_SERVICES: "api web"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same absolute path inside and out, so the nested `docker compose` resolves
+      # the compose file + .env + relative mounts identically to the host.
+      - ${DEPLOY_DIR:-/opt/campus}:${DEPLOY_DIR:-/opt/campus}
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:
   uploads_data:
